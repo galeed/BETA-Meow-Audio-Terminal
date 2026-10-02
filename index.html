@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <title>Meow Audio App</title>
+  <title>Quantum TUI Audio Player</title>
   
   <!-- Lector de metadatos ID3 -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jsmediatags/3.9.5/jsmediatags.min.js"></script>
@@ -384,11 +384,12 @@
       font-size: 0.8rem;
       cursor: pointer;
       background: rgba(0, 0, 0, 0.2);
-      transition: background 0.2s;
+      transition: background 0.2s, border-color 0.2s;
     }
 
-    .upload-zone:hover {
-      background: rgba(0, 0, 0, 0.4);
+    .upload-zone:hover, .upload-zone.dragover {
+      background: rgba(0, 255, 102, 0.1);
+      border-color: var(--accent-color);
     }
 
     .playlist-section {
@@ -443,6 +444,7 @@
       overflow: hidden;
       white-space: nowrap;
       text-overflow: ellipsis;
+      flex-grow: 1;
     }
 
     .track-item-actions {
@@ -456,6 +458,7 @@
       color: #ff5f56;
       cursor: pointer;
       font-size: 0.85rem;
+      padding: 2px 6px;
     }
 
     /* FOOTER / STATUS BAR */
@@ -490,7 +493,7 @@
         <div class="dot dot-yellow"></div>
         <div class="dot dot-green"></div>
       </div>
-      <div class="window-title">player@meow-box: ~/retro-player main*</div>
+      <div class="window-title">player@quantum-box: ~/retro-player main*</div>
       <div class="theme-selector">
         <select id="themeSelect">
           <option value="green">🟢 Phosphor Green</option>
@@ -509,7 +512,7 @@
       <!-- DECK DE CASSETTE -->
       <section class="cassette-deck">
         <div class="cassette-header">
-          <span>MAA</span>
+          <span>TYPE-II HIGH BIAS ID3-CACHE DECK</span>
           <span id="deckStatus">[STANDBY]</span>
         </div>
 
@@ -572,11 +575,11 @@
 
       <!-- BOTÓN / ZONA DE CARGA ARCHIVOS -->
       <div class="upload-zone" id="uploadZone">
-        ➕ CARGAR ARCHIVOS AUDIO LOCALES (MP3, WAV, M4A, FLAC)
-        <input type="file" id="fileinput" multiple accept="audio/*, .mp3, .wav, .flac, .ogg, .m4a, .aac" style="display:none;">
+        ➕ CARGAR ARCHIVOS AUDIO LOCALES O ARRASTRAR AQUÍ (MP3, WAV, FLAC, M4A, OGG, AIFF)
+        <input type="file" id="fileInput" accept="audio/*,.mp3,.wav,.flac,.m4a,.ogg,.aac,.aiff,.wma,.opus" multiple style="display: none;">
       </div>
 
-      <!-- LISTA DE REPRODUCCIÓN GUADARDA EN CACHÉ (INDEXEDDB) -->
+      <!-- LISTA DE REPRODUCCIÓN GUARDADA EN CACHÉ (INDEXEDDB) -->
       <section class="playlist-section">
         <div class="playlist-header">
           <span>TRACKLIST EN CACHÉ (INDEXEDDB)</span>
@@ -665,6 +668,7 @@
     let currentIndex = -1;
     let isShuffle = false;
     let isRepeat = false;
+    let currentObjectUrl = null;
 
     // Web Audio API para Visualizador
     let audioCtx = null;
@@ -672,7 +676,6 @@
     let sourceNode = null;
 
     // Elementos DOM
-    const fileInput = document.getElementById('fileinput');
     const playBtn = document.getElementById('playBtn');
     const prevBtn = document.getElementById('prevBtn');
     const nextBtn = document.getElementById('nextBtn');
@@ -711,44 +714,75 @@
     updateClock();
 
     /* ==========================================================
-       4. EXTRACCIÓN DE METADATOS ID3
+       4. UTILIDADES Y EXTRACCIÓN DE METADATOS
        ========================================================== */
+    function getMimeType(fileName, fileType) {
+      if (fileType && fileType.trim() !== "") return fileType;
+      const ext = fileName.split('.').pop().toLowerCase();
+      const mimeMap = {
+        'wav': 'audio/wav',
+        'flac': 'audio/flac',
+        'mp3': 'audio/mpeg',
+        'm4a': 'audio/mp4',
+        'aac': 'audio/aac',
+        'ogg': 'audio/ogg',
+        'opus': 'audio/opus',
+        'aiff': 'audio/aiff',
+        'wma': 'audio/x-ms-wma'
+      };
+      return mimeMap[ext] || 'audio/mpeg';
+    }
+
     function readMetadata(file) {
       return new Promise((resolve) => {
-        if (window.jsmediatags) {
-          window.jsmediatags.read(file, {
-            onSuccess: function(tag) {
-              const tags = tag.tags;
-              let pictureUrl = null;
+        const fallbackTitle = file.name.replace(/\.[^/.]+$/, "");
+        
+        // Solo intentar jsmediatags en MP3 para prevenir fallos con WAV/FLAC
+        const isMp3 = file.name.toLowerCase().endsWith('.mp3') || (file.type && file.type.includes('mpeg'));
 
-              if (tags.picture) {
-                const { data, format } = tags.picture;
-                let base64String = "";
-                for (let i = 0; i < data.length; i++) {
-                  base64String += String.fromCharCode(data[i]);
+        if (window.jsmediatags && isMp3) {
+          try {
+            window.jsmediatags.read(file, {
+              onSuccess: function(tag) {
+                const tags = tag.tags;
+                let pictureUrl = null;
+
+                if (tags.picture) {
+                  const { data, format } = tags.picture;
+                  let base64String = "";
+                  for (let i = 0; i < data.length; i++) {
+                    base64String += String.fromCharCode(data[i]);
+                  }
+                  pictureUrl = `data:${format};base64,${btoa(base64String)}`;
                 }
-                pictureUrl = `data:${format};base64,${btoa(base64String)}`;
-              }
 
-              resolve({
-                title: tags.title || file.name.replace(/\.[^/.]+$/, ""),
-                artist: tags.artist || "Artista Desconocido",
-                album: tags.album || "Álbum Desconocido",
-                picture: pictureUrl
-              });
-            },
-            onError: function() {
-              resolve({
-                title: file.name.replace(/\.[^/.]+$/, ""),
-                artist: "Artista Desconocido",
-                album: "Álbum Desconocido",
-                picture: null
-              });
-            }
-          });
+                resolve({
+                  title: tags.title || fallbackTitle,
+                  artist: tags.artist || "Artista Desconocido",
+                  album: tags.album || "Álbum Desconocido",
+                  picture: pictureUrl
+                });
+              },
+              onError: function() {
+                resolve({
+                  title: fallbackTitle,
+                  artist: "Artista Desconocido",
+                  album: "Álbum Desconocido",
+                  picture: null
+                });
+              }
+            });
+          } catch (err) {
+            resolve({
+              title: fallbackTitle,
+              artist: "Artista Desconocido",
+              album: "Álbum Desconocido",
+              picture: null
+            });
+          }
         } else {
           resolve({
-            title: file.name.replace(/\.[^/.]+$/, ""),
+            title: fallbackTitle,
             artist: "Artista Desconocido",
             album: "Álbum Desconocido",
             picture: null
@@ -758,27 +792,60 @@
     }
 
     /* ==========================================================
-       5. GESTIÓN DE ARCHIVOS Y CACHÉ
+       5. GESTIÓN DE ARCHIVOS, DROPS Y CACHÉ
        ========================================================== */
-    uploadZone.addEventListener('click', () => fileInput.click());
-    fileInput.addEventListener('change', async (e) => {
-      const files = Array.from(e.target.files);
+    async function processFiles(files) {
       for (const file of files) {
-        const metadata = await readMetadata(file);
-        const trackData = {
-          name: file.name,
-          blob: file,
-          title: metadata.title,
-          artist: metadata.artist,
-          album: metadata.album,
-          picture: metadata.picture,
-          size: (file.size / (1024 * 1024)).toFixed(2) + ' MB'
-        };
-        await saveTrackToDB(trackData);
+        try {
+          const mimeType = getMimeType(file.name, file.type);
+          const metadata = await readMetadata(file);
+          
+          // Guardar Blob explícito con tipo MIME válido
+          const typedBlob = new Blob([file], { type: mimeType });
+
+          const trackData = {
+            name: file.name,
+            blob: typedBlob,
+            mimeType: mimeType,
+            title: metadata.title,
+            artist: metadata.artist,
+            album: metadata.album,
+            picture: metadata.picture,
+            size: (file.size / (1024 * 1024)).toFixed(2) + ' MB'
+          };
+          await saveTrackToDB(trackData);
+        } catch (err) {
+          console.error("Error al procesar el archivo local:", file.name, err);
+        }
       }
       await loadPlaylistFromDB();
       if (currentIndex === -1 && playlist.length > 0) {
         loadTrack(0);
+      }
+    }
+
+    uploadZone.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', async (e) => {
+      if (e.target.files.length > 0) {
+        await processFiles(Array.from(e.target.files));
+        fileInput.value = '';
+      }
+    });
+
+    uploadZone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      uploadZone.classList.add('dragover');
+    });
+
+    uploadZone.addEventListener('dragleave', () => {
+      uploadZone.classList.remove('dragover');
+    });
+
+    uploadZone.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      uploadZone.classList.remove('dragover');
+      if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        await processFiles(Array.from(e.dataTransfer.files));
       }
     });
 
@@ -814,6 +881,7 @@
         currentIndex = -1;
         trackTitle.textContent = "Selecciona una canción";
         trackArtistAlbum.textContent = "Esperando archivo...";
+        document.getElementById('codecDisplay').textContent = "OFFLINE / CACHE";
       } else if (index < currentIndex) {
         currentIndex--;
       }
@@ -833,8 +901,19 @@
       currentIndex = index;
       const track = playlist[currentIndex];
 
-      const objectUrl = URL.createObjectURL(track.blob);
-      audio.src = objectUrl;
+      // Liberar URL previa para evitar fugas de memoria en archivos pesados como WAV/FLAC
+      if (currentObjectUrl) {
+        URL.revokeObjectURL(currentObjectUrl);
+      }
+
+      const mimeType = getMimeType(track.name, track.mimeType || (track.blob && track.blob.type));
+      const typedBlob = new Blob([track.blob], { type: mimeType });
+
+      currentObjectUrl = URL.createObjectURL(typedBlob);
+      audio.src = currentObjectUrl;
+
+      const ext = track.name.split('.').pop().toUpperCase();
+      document.getElementById('codecDisplay').textContent = `${ext} / CACHE`;
 
       trackTitle.textContent = track.title;
       trackArtistAlbum.textContent = `${track.artist} — ${track.album}`;
@@ -944,7 +1023,7 @@
        7. BARRA DE PROGRESO Y VOLUMEN
        ========================================================== */
     audio.addEventListener('timeupdate', () => {
-      if (!isNaN(audio.duration)) {
+      if (!isNaN(audio.duration) && audio.duration > 0) {
         const progress = (audio.currentTime / audio.duration) * 100;
         progressBar.value = progress;
         currentTimeDisplay.textContent = formatTime(audio.currentTime);
@@ -953,7 +1032,7 @@
     });
 
     progressBar.addEventListener('input', (e) => {
-      if (!isNaN(audio.duration)) {
+      if (!isNaN(audio.duration) && audio.duration > 0) {
         audio.currentTime = (e.target.value / 100) * audio.duration;
       }
     });

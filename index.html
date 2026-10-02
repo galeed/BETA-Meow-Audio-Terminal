@@ -211,12 +211,14 @@
       flex-shrink: 0;
       position: relative;
       overflow: hidden;
+      border-radius: 4px;
     }
 
     .cover-art-container img {
       width: 100%;
       height: 100%;
       object-fit: cover;
+      display: block;
     }
 
     .cover-placeholder {
@@ -279,6 +281,9 @@
     .track-artist-album {
       font-size: 0.85rem;
       color: var(--dim-text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     /* CANVAS ESPECTRO VISUALIZADOR */
@@ -517,7 +522,7 @@
         </div>
 
         <div class="deck-top">
-          <!-- CARÁTULA EXTRAÍDA -->
+          <!-- CARÁTULA EXTRAÍDA / ONLINE -->
           <div class="cover-art-container" id="coverArtBox">
             <span class="cover-placeholder">📻</span>
           </div>
@@ -596,7 +601,7 @@
     <footer class="terminal-footer">
       <span>● STATUS: 200 OK</span>
       <span>CACHE: INDEXEDDB</span>
-      <span>BACKGROUND & LOCKSCREEN: ACTIVE</span>
+      <span>ONLINE METADATA: ENABLED</span>
       <span id="utcClock">00:00:00 UTC</span>
     </footer>
 
@@ -635,6 +640,16 @@
         const tx = db.transaction('tracks', 'readwrite');
         const store = tx.objectStore('tracks');
         const req = store.add(trackData);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+    }
+
+    function updateTrackInDB(trackData) {
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction('tracks', 'readwrite');
+        const store = tx.objectStore('tracks');
+        const req = store.put(trackData);
         req.onsuccess = () => resolve(req.result);
         req.onerror = () => reject(req.error);
       });
@@ -714,7 +729,7 @@
     updateClock();
 
     /* ==========================================================
-       4. UTILIDADES Y EXTRACCIÓN DE METADATOS
+       4. BÚSQUEDA Y LECTURA DE METADATOS ONLINE / OFFLINE
        ========================================================== */
     function getMimeType(fileName, fileType) {
       if (fileType && fileType.trim() !== "") return fileType;
@@ -733,11 +748,44 @@
       return mimeMap[ext] || 'audio/mpeg';
     }
 
+    function cleanQueryString(str) {
+      return str
+        .replace(/\.[^/.]+$/, "")             // Quita extensión de archivo
+        .replace(/^[\d\s._\-]+/, "")          // Quita números de pista iniciales (ej. "01 - ")
+        .replace(/[\(\[\{].*?[\)\]\}]/g, "") // Quita textos en paréntesis como (Original Mix)
+        .trim();
+    }
+
+    async function fetchOnlineMetadata(rawTitle, rawArtist) {
+      try {
+        let query = cleanQueryString(rawTitle);
+        if (rawArtist && rawArtist !== "Artista Desconocido") {
+          query = `${rawArtist} ${query}`;
+        }
+
+        const response = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(query)}&media=music&limit=1`);
+        if (!response.ok) return null;
+
+        const data = await response.json();
+        if (data.resultCount > 0 && data.results[0]) {
+          const item = data.results[0];
+          const highResArtwork = item.artworkUrl100 ? item.artworkUrl100.replace('100x100bb', '600x600bb') : null;
+          return {
+            title: item.trackName || rawTitle,
+            artist: item.artistName || rawArtist,
+            album: item.collectionName || "Álbum Desconocido",
+            picture: highResArtwork
+          };
+        }
+      } catch (err) {
+        console.warn("Error al buscar metadatos en línea:", err);
+      }
+      return null;
+    }
+
     function readMetadata(file) {
       return new Promise((resolve) => {
         const fallbackTitle = file.name.replace(/\.[^/.]+$/, "");
-        
-        // Solo intentar jsmediatags en MP3 para prevenir fallos con WAV/FLAC
         const isMp3 = file.name.toLowerCase().endsWith('.mp3') || (file.type && file.type.includes('mpeg'));
 
         if (window.jsmediatags && isMp3) {
@@ -792,7 +840,7 @@
     }
 
     /* ==========================================================
-       5. GESTIÓN DE ARCHIVOS, DROPS Y CACHÉ
+       5. GESTIÓN DE ARCHIVOS Y CACHÉ
        ========================================================== */
     async function processFiles(files) {
       for (const file of files) {
@@ -800,7 +848,6 @@
           const mimeType = getMimeType(file.name, file.type);
           const metadata = await readMetadata(file);
           
-          // Guardar Blob explícito con tipo MIME válido
           const typedBlob = new Blob([file], { type: mimeType });
 
           const trackData = {
@@ -882,6 +929,7 @@
         trackTitle.textContent = "Selecciona una canción";
         trackArtistAlbum.textContent = "Esperando archivo...";
         document.getElementById('codecDisplay').textContent = "OFFLINE / CACHE";
+        coverArtBox.innerHTML = `<span class="cover-placeholder">📻</span>`;
       } else if (index < currentIndex) {
         currentIndex--;
       }
@@ -894,14 +942,13 @@
     }
 
     /* ==========================================================
-       6. LÓGICA DE REPRODUCCIÓN & MEDIA SESSION API
+       6. CARGA DE PISTA Y OBTENCIÓN DE PORTADA
        ========================================================== */
-    function loadTrack(index) {
+    async function loadTrack(index) {
       if (index < 0 || index >= playlist.length) return;
       currentIndex = index;
       const track = playlist[currentIndex];
 
-      // Liberar URL previa para evitar fugas de memoria en archivos pesados como WAV/FLAC
       if (currentObjectUrl) {
         URL.revokeObjectURL(currentObjectUrl);
       }
@@ -918,20 +965,55 @@
       trackTitle.textContent = track.title;
       trackArtistAlbum.textContent = `${track.artist} — ${track.album}`;
 
+      // Si ya cuenta con portada incrustada o recuperada previamente
       if (track.picture) {
         coverArtBox.innerHTML = `<img src="${track.picture}" alt="Cover">`;
+        setupMediaSession(track);
       } else {
-        coverArtBox.innerHTML = `<span class="cover-placeholder">📻</span>`;
+        // Buscar metadatos y portada en línea
+        coverArtBox.innerHTML = `<span class="cover-placeholder">🌐</span>`;
+        setupMediaSession(track);
+
+        const onlineData = await fetchOnlineMetadata(track.title || track.name, track.artist);
+        
+        // Confirmar que la pista sigue activa tras la solicitud asíncrona
+        if (currentIndex === index) {
+          if (onlineData) {
+            if (onlineData.picture) {
+              track.picture = onlineData.picture;
+              coverArtBox.innerHTML = `<img src="${onlineData.picture}" alt="Cover">`;
+            } else {
+              coverArtBox.innerHTML = `<span class="cover-placeholder">📻</span>`;
+            }
+
+            if (onlineData.artist && track.artist === "Artista Desconocido") {
+              track.artist = onlineData.artist;
+            }
+            if (onlineData.album && (track.album === "Álbum Desconocido" || !track.album)) {
+              track.album = onlineData.album;
+            }
+            if (onlineData.title) {
+              track.title = onlineData.title;
+            }
+
+            trackTitle.textContent = track.title;
+            trackArtistAlbum.textContent = `${track.artist} — ${track.album}`;
+
+            await updateTrackInDB(track);
+            setupMediaSession(track);
+          } else {
+            coverArtBox.innerHTML = `<span class="cover-placeholder">📻</span>`;
+          }
+        }
       }
 
-      setupMediaSession(track);
       renderPlaylist();
     }
 
     function setupMediaSession(track) {
       if ('mediaSession' in navigator) {
         const artworkArray = track.picture 
-          ? [{ src: track.picture, sizes: '512x512', type: 'image/png' }]
+          ? [{ src: track.picture, sizes: '512x512', type: 'image/jpeg' }]
           : [];
 
         navigator.mediaSession.metadata = new MediaMetadata({

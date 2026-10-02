@@ -212,6 +212,7 @@
       position: relative;
       overflow: hidden;
       border-radius: 4px;
+      box-shadow: inset 0 0 10px rgba(0,0,0,0.8);
     }
 
     .cover-art-container img {
@@ -222,8 +223,14 @@
     }
 
     .cover-placeholder {
-      font-size: 2.2rem;
-      opacity: 0.5;
+      font-size: 2rem;
+      opacity: 0.7;
+      animation: pulse 2s infinite ease-in-out;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 0.4; }
+      50% { opacity: 0.9; }
     }
 
     .cassette-wheels {
@@ -498,7 +505,7 @@
         <div class="dot dot-yellow"></div>
         <div class="dot dot-green"></div>
       </div>
-      <div class="window-title">player@meow-box: ~/retro-player main*</div>
+      <div class="window-title">player@quantum-box: ~/retro-player main*</div>
       <div class="theme-selector">
         <select id="themeSelect">
           <option value="green">🟢 Phosphor Green</option>
@@ -517,12 +524,12 @@
       <!-- DECK DE CASSETTE -->
       <section class="cassette-deck">
         <div class="cassette-header">
-          <span>MEOW AUDIO APP</span>
+          <span>TYPE-II HIGH BIAS ID3-CACHE DECK</span>
           <span id="deckStatus">[STANDBY]</span>
         </div>
 
         <div class="deck-top">
-          <!-- CARÁTULA EXTRAÍDA / ONLINE -->
+          <!-- CARÁTULA EXTRAÍDA / ONLINE (CUADRO ROJO) -->
           <div class="cover-art-container" id="coverArtBox">
             <span class="cover-placeholder">📻</span>
           </div>
@@ -531,7 +538,7 @@
           <div class="cassette-wheels">
             <div class="wheel" id="wheelLeft"></div>
             <div class="tape-window">
-              <span>MEOW TAPE</span><br>
+              <span>QUANTUM TAPE</span><br>
               <small id="codecDisplay">OFFLINE / CACHE</small>
             </div>
             <div class="wheel" id="wheelRight"></div>
@@ -601,7 +608,7 @@
     <footer class="terminal-footer">
       <span>● STATUS: 200 OK</span>
       <span>CACHE: INDEXEDDB</span>
-      <span>ONLINE METADATA: ENABLED</span>
+      <span>ONLINE METADATA: ACTIVE</span>
       <span id="utcClock">00:00:00 UTC</span>
     </footer>
 
@@ -729,7 +736,7 @@
     updateClock();
 
     /* ==========================================================
-       4. BÚSQUEDA Y LECTURA DE METADATOS ONLINE / OFFLINE
+       4. ANALIZADOR DE ARCHIVOS Y MULTI-API METADATA ONLINE
        ========================================================== */
     function getMimeType(fileName, fileType) {
       if (fileType && fileType.trim() !== "") return fileType;
@@ -748,44 +755,93 @@
       return mimeMap[ext] || 'audio/mpeg';
     }
 
-    function cleanQueryString(str) {
-      return str
-        .replace(/\.[^/.]+$/, "")             // Quita extensión de archivo
-        .replace(/^[\d\s._\-]+/, "")          // Quita números de pista iniciales (ej. "01 - ")
-        .replace(/[\(\[\{].*?[\)\]\}]/g, "") // Quita textos en paréntesis como (Original Mix)
+    // Parsea nombres tipo "01 - Anderex - Stone Cold Killa"
+    function parseFilename(filename) {
+      let clean = filename
+        .replace(/\.[^/.]+$/, "")             // Remueve extensión
+        .replace(/^[\d\s._\-]+/, "")          // Remueve número de pista inicial ("01 - ")
+        .replace(/[\(\[\{].*?[\)\]\}]/g, "") // Remueve texto en paréntesis (ej. (Original Mix))
         .trim();
+
+      const parts = clean.split(/\s*[\-\–\—]\s*/);
+      if (parts.length >= 2) {
+        return {
+          artist: parts[0].trim(),
+          title: parts.slice(1).join(' - ').trim()
+        };
+      }
+      return {
+        artist: "Artista Desconocido",
+        title: clean || filename
+      };
+    }
+
+    // Prepara una cadena limpia para la búsqueda en APIs
+    function cleanQuery(str) {
+      return str.replace(/[^a-zA-Z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
     }
 
     async function fetchOnlineMetadata(rawTitle, rawArtist) {
-      try {
-        let query = cleanQueryString(rawTitle);
-        if (rawArtist && rawArtist !== "Artista Desconocido") {
-          query = `${rawArtist} ${query}`;
-        }
+      let queryArtist = rawArtist !== "Artista Desconocido" ? rawArtist : "";
+      let queryTitle = rawTitle;
 
-        const response = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(query)}&media=music&limit=1`);
-        if (!response.ok) return null;
+      // Intentar iTunes API primero
+      let searchTerms = [
+        `${queryArtist} ${queryTitle}`.trim(),
+        cleanQuery(`${queryArtist} ${queryTitle}`),
+        cleanQuery(queryTitle)
+      ];
 
-        const data = await response.json();
-        if (data.resultCount > 0 && data.results[0]) {
-          const item = data.results[0];
-          const highResArtwork = item.artworkUrl100 ? item.artworkUrl100.replace('100x100bb', '600x600bb') : null;
-          return {
-            title: item.trackName || rawTitle,
-            artist: item.artistName || rawArtist,
-            album: item.collectionName || "Álbum Desconocido",
-            picture: highResArtwork
-          };
+      for (let term of searchTerms) {
+        if (!term) continue;
+        try {
+          const res = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(term)}&media=music&limit=1`);
+          if (res.ok) {
+            const data = await res.json();
+            if (data.resultCount > 0 && data.results[0]) {
+              const item = data.results[0];
+              const highRes = item.artworkUrl100 ? item.artworkUrl100.replace('100x100bb', '600x600bb') : null;
+              return {
+                title: item.trackName || rawTitle,
+                artist: item.artistName || rawArtist,
+                album: item.collectionName || "Álbum Desconocido",
+                picture: highRes
+              };
+            }
+          }
+        } catch (e) {
+          console.warn("Error buscando en iTunes API:", e);
         }
-      } catch (err) {
-        console.warn("Error al buscar metadatos en línea:", err);
       }
+
+      // API Secundaria (Deezer mediante proxy CORS)
+      try {
+        const deezerTerm = cleanQuery(`${queryArtist} ${queryTitle}`);
+        const deezerUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(`https://api.deezer.com/search?q=${deezerTerm}`)}`;
+        const res = await fetch(deezerUrl);
+        if (res.ok) {
+          const wrapper = await res.json();
+          const data = JSON.parse(wrapper.contents);
+          if (data && data.data && data.data.length > 0) {
+            const item = data.data[0];
+            return {
+              title: item.title || rawTitle,
+              artist: item.artist ? item.artist.name : rawArtist,
+              album: item.album ? item.album.title : "Álbum Desconocido",
+              picture: item.album ? item.album.cover_xl || item.album.cover_big : null
+            };
+          }
+        }
+      } catch (e) {
+        console.warn("Error buscando en API secundaria Deezer:", e);
+      }
+
       return null;
     }
 
     function readMetadata(file) {
       return new Promise((resolve) => {
-        const fallbackTitle = file.name.replace(/\.[^/.]+$/, "");
+        const parsed = parseFilename(file.name);
         const isMp3 = file.name.toLowerCase().endsWith('.mp3') || (file.type && file.type.includes('mpeg'));
 
         if (window.jsmediatags && isMp3) {
@@ -805,16 +861,16 @@
                 }
 
                 resolve({
-                  title: tags.title || fallbackTitle,
-                  artist: tags.artist || "Artista Desconocido",
+                  title: tags.title || parsed.title,
+                  artist: tags.artist || parsed.artist,
                   album: tags.album || "Álbum Desconocido",
                   picture: pictureUrl
                 });
               },
               onError: function() {
                 resolve({
-                  title: fallbackTitle,
-                  artist: "Artista Desconocido",
+                  title: parsed.title,
+                  artist: parsed.artist,
                   album: "Álbum Desconocido",
                   picture: null
                 });
@@ -822,16 +878,16 @@
             });
           } catch (err) {
             resolve({
-              title: fallbackTitle,
-              artist: "Artista Desconocido",
+              title: parsed.title,
+              artist: parsed.artist,
               album: "Álbum Desconocido",
               picture: null
             });
           }
         } else {
           resolve({
-            title: fallbackTitle,
-            artist: "Artista Desconocido",
+            title: parsed.title,
+            artist: parsed.artist,
             album: "Álbum Desconocido",
             picture: null
           });
@@ -862,7 +918,7 @@
           };
           await saveTrackToDB(trackData);
         } catch (err) {
-          console.error("Error al procesar el archivo local:", file.name, err);
+          console.error("Error procesando archivo local:", file.name, err);
         }
       }
       await loadPlaylistFromDB();
@@ -937,7 +993,7 @@
     }
 
     function escapeHTML(str) {
-      return str.replace(/[&<>'"]/g, 
+      return (str || '').replace(/[&<>'"]/g, 
         tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag] || tag));
     }
 
@@ -965,28 +1021,24 @@
       trackTitle.textContent = track.title;
       trackArtistAlbum.textContent = `${track.artist} — ${track.album}`;
 
-      // Si ya cuenta con portada incrustada o recuperada previamente
+      // Si ya cuenta con portada local o caché en base de datos
       if (track.picture) {
         coverArtBox.innerHTML = `<img src="${track.picture}" alt="Cover">`;
         setupMediaSession(track);
       } else {
-        // Buscar metadatos y portada en línea
-        coverArtBox.innerHTML = `<span class="cover-placeholder">🌐</span>`;
+        // Muestra indicador visual de búsqueda en vivo
+        coverArtBox.innerHTML = `<span class="cover-placeholder" title="Buscando carátula en línea...">🔍</span>`;
         setupMediaSession(track);
 
-        const onlineData = await fetchOnlineMetadata(track.title || track.name, track.artist);
+        const onlineData = await fetchOnlineMetadata(track.title, track.artist);
         
-        // Confirmar que la pista sigue activa tras la solicitud asíncrona
+        // Confirmar que la pista seleccionada sigue siendo la misma tras la consulta asíncrona
         if (currentIndex === index) {
-          if (onlineData) {
-            if (onlineData.picture) {
-              track.picture = onlineData.picture;
-              coverArtBox.innerHTML = `<img src="${onlineData.picture}" alt="Cover">`;
-            } else {
-              coverArtBox.innerHTML = `<span class="cover-placeholder">📻</span>`;
-            }
+          if (onlineData && onlineData.picture) {
+            track.picture = onlineData.picture;
+            coverArtBox.innerHTML = `<img src="${onlineData.picture}" alt="Cover">`;
 
-            if (onlineData.artist && track.artist === "Artista Desconocido") {
+            if (onlineData.artist && (track.artist === "Artista Desconocido" || !track.artist)) {
               track.artist = onlineData.artist;
             }
             if (onlineData.album && (track.album === "Álbum Desconocido" || !track.album)) {
@@ -999,6 +1051,7 @@
             trackTitle.textContent = track.title;
             trackArtistAlbum.textContent = `${track.artist} — ${track.album}`;
 
+            // Guardar cambios en IndexedDB
             await updateTrackInDB(track);
             setupMediaSession(track);
           } else {
@@ -1044,7 +1097,7 @@
           deckStatus.textContent = '[PLAYING]';
           wheelLeft.classList.add('spinning');
           wheelRight.classList.add('spinning');
-        }).catch(err => console.log("Playback error:", err));
+        }).catch(err => console.log("Error al reproducir:", err));
       }
     }
 
